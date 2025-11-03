@@ -39,6 +39,25 @@ const wss = new WebSocket.Server({ server });
 // Store active connections
 const clients = new Map();
 
+// In-memory chat history per peer pair (limited size)
+// Key format: `${minIP}|${maxIP}`
+const chatHistory = new Map();
+
+function getPairKey(ipA, ipB) {
+  if (!ipA || !ipB) return null;
+  return ipA < ipB ? `${ipA}|${ipB}` : `${ipB}|${ipA}`;
+}
+
+function appendChatHistory(fromIP, toIP, message) {
+  const key = getPairKey(fromIP, toIP);
+  if (!key) return;
+  const list = chatHistory.get(key) || [];
+  list.push(message);
+  // Keep only last 100 messages
+  while (list.length > 100) list.shift();
+  chatHistory.set(key, list);
+}
+
 // Broadcast to all clients
 function broadcast(data, excludeClient = null) {
   wss.clients.forEach((client) => {
@@ -94,6 +113,63 @@ wss.on('connection', (ws, req) => {
             }
           }
           break;
+
+        case 'chat-message': {
+          // Relay chat message to target and echo back to sender acknowledgement
+          const senderIP = clients.get(ws)?.localIP || 'unknown';
+          const { targetIP, text, timestamp } = data;
+          if (!targetIP || typeof text !== 'string' || text.trim() === '') {
+            break;
+          }
+          const msg = {
+            type: 'chat-message',
+            fromIP: senderIP,
+            targetIP,
+            text,
+            timestamp: timestamp || Date.now()
+          };
+
+          // Save to history
+          appendChatHistory(senderIP, targetIP, msg);
+
+          let delivered = false;
+          wss.clients.forEach((client) => {
+            const info = clients.get(client);
+            if (info && info.localIP === targetIP && client.readyState === WebSocket.OPEN) {
+              try {
+                client.send(JSON.stringify(msg));
+                delivered = true;
+              } catch (e) {}
+            }
+          });
+
+          // Optionally notify sender of delivery state
+          try {
+            ws.send(JSON.stringify({
+              type: 'chat-delivery',
+              toIP: targetIP,
+              delivered,
+              timestamp: msg.timestamp
+            }));
+          } catch (e) {}
+          break;
+        }
+
+        case 'request-chat-history': {
+          const requesterIP = clients.get(ws)?.localIP || 'unknown';
+          const { peerIP } = data;
+          if (!peerIP) break;
+          const key = getPairKey(requesterIP, peerIP);
+          const history = chatHistory.get(key) || [];
+          try {
+            ws.send(JSON.stringify({
+              type: 'chat-history',
+              peerIP,
+              messages: history
+            }));
+          } catch (e) {}
+          break;
+        }
 
         case 'disconnect':
           clients.delete(ws);

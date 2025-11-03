@@ -10,12 +10,17 @@ const VideoCall = () => {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [error, setError] = useState('');
   const [localVideoStarted, setLocalVideoStarted] = useState(false);
+  const [messages, setMessages] = useState([]); // {id, fromIP, text, timestamp, outgoing}
+  const [chatInput, setChatInput] = useState('');
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [isChatOpen, setIsChatOpen] = useState(true);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const wsRef = useRef(null);
   const localStreamRef = useRef(null);
+  const chatEndRef = useRef(null);
 
   // Get local IP address
   useEffect(() => {
@@ -107,6 +112,18 @@ const VideoCall = () => {
 
       case 'ice-candidate':
         await handleIceCandidate(data);
+        break;
+
+      case 'chat-message':
+        handleIncomingChatMessage(data);
+        break;
+
+      case 'chat-history':
+        handleChatHistory(data);
+        break;
+
+      case 'chat-delivery':
+        // Could be used to show delivered state; currently no-op
         break;
 
       default:
@@ -255,6 +272,11 @@ const VideoCall = () => {
         targetIP: peerIP
       }));
 
+      // Request chat history with this peer
+      wsRef.current.send(JSON.stringify({
+        type: 'request-chat-history',
+        peerIP: peerIP
+      }));
       setConnectionStatus('connecting');
     } catch (err) {
       console.error('Error creating offer:', err);
@@ -308,6 +330,14 @@ const VideoCall = () => {
           console.log('Sent ICE candidate to:', data.fromIP);
         }
       };
+
+      // Request chat history after answering
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'request-chat-history',
+          peerIP: data.fromIP
+        }));
+      }
     } catch (err) {
       console.error('Error handling offer:', err);
       setError('Failed to handle connection offer');
@@ -389,6 +419,8 @@ const VideoCall = () => {
     setConnectionStatus('disconnected');
     setPeerIP('');
     setError('');
+    setMessages([]);
+    setUnreadCount(0);
     // Note: We don't stop local video here, only on cleanup
   };
 
@@ -402,6 +434,70 @@ const VideoCall = () => {
       disconnect();
     };
   }, []);
+
+  // Chat handlers
+  const handleIncomingChatMessage = (data) => {
+    const isFromPeer = data.fromIP && data.fromIP !== localIP;
+    const msg = {
+      id: `${data.timestamp || Date.now()}-${Math.random().toString(36).slice(2)}`,
+      fromIP: data.fromIP,
+      text: data.text,
+      timestamp: data.timestamp || Date.now(),
+      outgoing: !isFromPeer
+    };
+    setMessages((prev) => [...prev, msg]);
+    if (!isChatOpen) {
+      setUnreadCount((c) => c + 1);
+    }
+  };
+
+  const handleChatHistory = (data) => {
+    if (!data || !Array.isArray(data.messages)) return;
+    const mapped = data.messages.map((m) => ({
+      id: `${m.timestamp}-${Math.random().toString(36).slice(2)}`,
+      fromIP: m.fromIP,
+      text: m.text,
+      timestamp: m.timestamp,
+      outgoing: m.fromIP === localIP
+    }));
+    setMessages(mapped);
+  };
+
+  const sendChatMessage = () => {
+    if (!chatInput.trim() || !peerIP || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const text = chatInput.trim();
+    const timestamp = Date.now();
+    const outgoingMsg = {
+      id: `${timestamp}-${Math.random().toString(36).slice(2)}`,
+      fromIP: localIP,
+      text,
+      timestamp,
+      outgoing: true
+    };
+    setMessages((prev) => [...prev, outgoingMsg]);
+    wsRef.current.send(JSON.stringify({
+      type: 'chat-message',
+      targetIP: peerIP,
+      text,
+      timestamp
+    }));
+    setChatInput('');
+  };
+
+  // Auto-scroll chat to bottom on new messages
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
+
+  const toggleChat = () => {
+    setIsChatOpen((open) => {
+      const next = !open;
+      if (next) setUnreadCount(0);
+      return next;
+    });
+  };
 
   return (
     <div className="video-call-container">
@@ -511,6 +607,45 @@ const VideoCall = () => {
           <div className="video-label">Peer</div>
         </div>
       </div>
+
+      {isConnected && (
+        <div className="chat-panel">
+          <div className="chat-header">
+            <span>💬 Chat</span>
+            <button className="btn btn-secondary" onClick={toggleChat}>
+              {isChatOpen ? 'Hide' : `Show${unreadCount ? ` (${unreadCount})` : ''}`}
+            </button>
+          </div>
+          {isChatOpen && (
+            <div className="chat-body">
+              <div className="messages-list">
+                {messages.map((m) => (
+                  <div key={m.id} className={`message ${m.outgoing ? 'outgoing' : 'incoming'}`}>
+                    <div className="bubble">
+                      <div className="text">{m.text}</div>
+                      <div className="meta">{new Date(m.timestamp).toLocaleTimeString()}</div>
+                    </div>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+              <div className="chat-input-row">
+                <input
+                  type="text"
+                  placeholder="Type a message"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') sendChatMessage();
+                  }}
+                  className="input-field"
+                />
+                <button className="btn btn-primary" onClick={sendChatMessage}>Send</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
